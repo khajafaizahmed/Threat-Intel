@@ -84,6 +84,7 @@ with st.expander("🧭 How to use this app (quick guide)", expanded=False):
 3. See totals & charts in **📊 Dashboard**. Use filters to refine.
 4. Browse all rows in **🗂️ Data Explorer** and **Export** CSV/JSON or **Download Markdown**.
 5. Analyze `.eml` files in **✉️ Phishing Analyzer (EML)** to extract headers, URLs/IoCs, summary, labels & severity.
+6. (New) **📱 Phone Checker**: validate/normalize a phone number, view carrier/region/type, get a risk score, and optionally save to DB.
     """)
 
 # --- Load config & resources (cached) ---
@@ -175,7 +176,8 @@ with st.sidebar:
 
     st.caption("Models load lazily and fall back to rules if unavailable.")
 
-tabs = st.tabs(["📊 Dashboard", "🔎 Scrape Now", "✉️ Phishing Analyzer (EML)", "🗂️ Data Explorer"])
+# NOTE: We now have five tabs including Phone Checker
+tabs = st.tabs(["📊 Dashboard", "🔎 Scrape Now", "✉️ Phishing Analyzer (EML)", "📱 Phone Checker", "🗂️ Data Explorer"])
 
 def apply_pipeline_and_persist(items: List[Dict[str, Any]], source_name: str) -> int:
     """Process raw items -> summarize, classify, IoCs, severity, persist."""
@@ -368,8 +370,99 @@ with tabs[2]:
                 st.error(f"Failed to process EML: {e}")
         st.success(f"Saved {count} EML item(s) to database.")
 
-# --- Tab: Data Explorer ---
+# --- Tab: Phone Checker ---
 with tabs[3]:
+    st.subheader("Phone Number Reputation")
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        raw_number = st.text_input("Enter a phone number", placeholder="+1 415 555 0100 or 415-555-0100")
+    with c2:
+        default_region = st.selectbox(
+            "Default region",
+            ["US","GB","CA","AU","IN","SG","DE","FR","BR","ZA","JP"],
+            index=0
+        )
+
+    run = st.button("Check number", type="primary")
+    save_to_db = st.checkbox("Also save result to database", value=False, help="Stores a summary as an item (source = phone:lookup)")
+
+    analyze_func = getattr(utils, "analyze_phone_number", None)
+    risk_func = getattr(utils, "phone_risk_score", None)
+    enrich_func = getattr(utils, "numverify_lookup_cached", None)
+
+    if run:
+        if not callable(analyze_func) or not callable(risk_func):
+            st.warning(
+                "Phone checker helpers not found. Add `phonenumbers==8.13.43` to requirements and paste the "
+                "`analyze_phone_number` and `phone_risk_score` helpers into `threat_intel/utils.py`.",
+                icon="🧩",
+            )
+        else:
+            info = analyze_func(raw_number, default_region=default_region)
+            if info.get("error") == "phonenumbers not installed":
+                st.warning("Install `phonenumbers==8.13.43` and redeploy.", icon="📦")
+            elif info.get("error"):
+                st.error(info["error"])
+            else:
+                risk = risk_func(info)
+                colA, colB = st.columns([1,1])
+                with colA:
+                    st.metric("Risk score", risk["score"], help="Heuristic 1 (low) → 5 (high)")
+                    st.json({"signals": risk["signals"]})
+                with colB:
+                    st.json(
+                        {
+                            "normalized": {
+                                "e164": info.get("e164"),
+                                "national": info.get("national"),
+                                "region": info.get("region"),
+                            },
+                            "valid": info.get("valid"),
+                            "type": info.get("type"),
+                            "carrier": info.get("carrier"),
+                            "location": info.get("location"),
+                        }
+                    )
+
+                # Optional external enrichment (NumVerify), if key present and helper exists
+                if st.secrets.get("NUMVERIFY_API_KEY") and callable(enrich_func):
+                    with st.spinner("Enriching via NumVerify…"):
+                        nv = enrich_func(info.get("e164", ""))
+                        if nv:
+                            st.markdown("**NumVerify**")
+                            st.json(nv)
+
+                # Optional: Save a simple record into DB as an "item"
+                if save_to_db and info.get("e164"):
+                    try:
+                        title = f"Phone reputation: {info['e164']} (score {risk['score']})"
+                        text = (
+                            f"Region: {info.get('region','')} | Carrier: {info.get('carrier','')} | "
+                            f"Type: {info.get('type','')} | Valid: {info.get('valid')}\n"
+                            f"Signals: {', '.join(risk['signals'])}"
+                        )
+                        item_obj = {
+                            "title": title,
+                            "url": f"tel:{info['e164']}",
+                            "source": "phone:lookup",
+                            "published_at": datetime.utcnow().isoformat(),
+                            "text": text,
+                            "summary": text[:300],
+                            "severity": int(risk["score"]),
+                        }
+                        item_id = upsert_item(conn, item_obj)
+                        # Light labeling based on risk
+                        lbls = ["Phishing"] if risk["score"] >= 4 else ["Other"]
+                        insert_labels(conn, item_id, lbls)
+                        st.success("Saved to database.")
+                    except Exception as e:
+                        st.warning(f"Could not save to DB: {e}")
+
+    st.caption("Note: This offline check is heuristic. Use multiple signals before blocking a caller.")
+
+# --- Tab: Data Explorer ---
+with tabs[4]:
     st.subheader("Explore & Export")
 
     df = query_items(
