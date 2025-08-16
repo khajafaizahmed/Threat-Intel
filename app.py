@@ -44,6 +44,10 @@ st.set_page_config(
 # --- Session state (for auto-updated UI hints) ---
 if "last_ingest" not in st.session_state:
     st.session_state["last_ingest"] = "—"
+if "time_window_days" not in st.session_state:
+    st.session_state["time_window_days"] = 14
+if "sev_min" not in st.session_state:
+    st.session_state["sev_min"] = 1
 
 # --- Header / Branding ---
 left, right = st.columns([1, 5], gap="large")
@@ -55,6 +59,32 @@ with left:
 with right:
     st.markdown(f"# {APP_NAME}")
     st.caption("Scrape → Extract IoCs → Summarize → Classify → Store → Visualize (CPU-friendly)")
+
+# Mode badge (lets users know if models are active or in fallback)
+mode_cols = st.columns([1, 1.8, 3.2])
+with mode_cols[0]:
+    models_enabled = os.environ.get("DISABLE_HF", "").lower() not in ("1", "true", "yes")
+    # Note: summarizer/zeroshot may still be None even if DISABLE_HF=0 due to install limits
+    st.info("Mode: **Rules-only**" if not models_enabled else "Mode: **Models enabled**", icon="⚙️")
+with mode_cols[1]:
+    # Quick link to a built-in help panel
+    st.link_button("Quick Guide ↓", "#quick-guide")
+with mode_cols[2]:
+    # Optional: one-click manual refresh (handy after changing filters)
+    if st.button("🔄 Refresh data"):
+        st.cache_data.clear()
+        st.rerun()
+
+# --- Quick Guide (collapsible help) ---
+st.markdown("<div id='quick-guide'></div>", unsafe_allow_html=True)
+with st.expander("🧭 How to use this app (quick guide)", expanded=False):
+    st.markdown("""
+1. **Pick sources** in the sidebar (Filters).
+2. Go to **🔎 Scrape Now** and click **Fetch Latest**. The app will auto-refresh.
+3. See totals & charts in **📊 Dashboard**. Use filters to refine.
+4. Browse all rows in **🗂️ Data Explorer** and **Export** CSV/JSON or **Download Markdown**.
+5. Analyze `.eml` files in **✉️ Phishing Analyzer (EML)** to extract headers, URLs/IoCs, summary, labels & severity.
+    """)
 
 # --- Load config & resources (cached) ---
 @st.cache_data(show_spinner=False)
@@ -83,18 +113,44 @@ zeroshot = cached_zeroshot()      # may be None
 # --- Sidebar Filters / Tools ---
 with st.sidebar:
     st.subheader("Filters")
+
     all_sources = [s["name"] for s in sources_cfg if s.get("enabled", True)]
     source_sel = st.multiselect("Sources", options=all_sources, default=all_sources)
 
-    default_days = 14
-    time_window_days = st.slider("Time window (days)", min_value=1, max_value=90, value=default_days)
+    st.caption("Time window")
+    # Quick presets for time range
+    p7, p30, p90 = st.columns(3)
+    if p7.button("7d"):
+        st.session_state["time_window_days"] = 7
+        st.rerun()
+    if p30.button("30d"):
+        st.session_state["time_window_days"] = 30
+        st.rerun()
+    if p90.button("90d"):
+        st.session_state["time_window_days"] = 90
+        st.rerun()
+
+    time_window_days = st.slider(
+        "Days", min_value=1, max_value=90, value=st.session_state["time_window_days"], key="time_window_days"
+    )
     date_to = datetime.utcnow()
     date_from = date_to - timedelta(days=time_window_days)
 
     categories = ["Malware", "Ransomware", "Phishing", "Vulnerability", "Data Breach", "Other"]
     category_sel = st.multiselect("Categories", options=categories, default=[])
 
-    severity_min = st.slider("Severity ≥", min_value=1, max_value=5, value=1)
+    st.caption("Severity threshold")
+    s3, s4, s5 = st.columns(3)
+    if s3.button("≥3"):
+        st.session_state["sev_min"] = 3
+        st.rerun()
+    if s4.button("≥4"):
+        st.session_state["sev_min"] = 4
+        st.rerun()
+    if s5.button("≥5"):
+        st.session_state["sev_min"] = 5
+        st.rerun()
+    severity_min = st.slider("Severity ≥", min_value=1, max_value=5, value=st.session_state["sev_min"], key="sev_min")
 
     text_q = st.text_input("Search text", "")
 
@@ -110,6 +166,13 @@ with st.sidebar:
         st.info("Provide `VIRUSTOTAL_API_KEY` in `.streamlit/secrets.toml` to enable lookups.", icon="🔐")
 
     st.divider()
+    with st.expander("Utilities", expanded=False):
+        st.caption("Clear cached data if charts look stale.")
+        if st.button("🧹 Clear cached data"):
+            st.cache_data.clear()
+            st.success("Cache cleared. Refreshing…")
+            st.rerun()
+
     st.caption("Models load lazily and fall back to rules if unavailable.")
 
 tabs = st.tabs(["📊 Dashboard", "🔎 Scrape Now", "✉️ Phishing Analyzer (EML)", "🗂️ Data Explorer"])
@@ -159,6 +222,13 @@ with tabs[0]:
     st.subheader("Overview")
     st.caption(f"Last ingest: {st.session_state.get('last_ingest','—')}")
 
+    # Friendly summary of current filters
+    st.caption(
+        f"Filters: {len(source_sel)} source(s) • {date_from.strftime('%Y-%m-%d')} → {date_to.strftime('%Y-%m-%d')} • "
+        f"Severity ≥ {severity_min}" + (f" • Search: “{text_q}”" if text_q else "")
+        + (f" • Categories: {', '.join(category_sel)}" if category_sel else "")
+    )
+
     df = query_items(
         conn,
         sources=source_sel,
@@ -174,6 +244,7 @@ with tabs[0]:
     total_items = len(df)
     unique_iocs = 0
     top_source = "-"
+    ioc_df = pd.DataFrame(columns=["item_id", "type", "value"])
     if total_items > 0:
         ids = df["id"].tolist()
         ioc_df = get_iocs_for_item_ids(conn, ids)
@@ -314,7 +385,7 @@ with tabs[3]:
 
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         if not df.empty:
             csv = df.to_csv(index=False).encode("utf-8")
@@ -329,5 +400,11 @@ with tabs[3]:
             st.download_button(
                 "Download Markdown Report", md.encode("utf-8"), file_name="threat_report.md", mime="text/markdown"
             )
+    with c4:
+        # Optional: download the SQLite DB (handy for debugging/demo)
+        db_path = "data/threats.db"
+        if os.path.exists(db_path):
+            with open(db_path, "rb") as f:
+                st.download_button("Download DB", f, file_name="threats.db", mime="application/octet-stream")
 
 st.caption("© 2025 • For demo, education, and research. Respect source ToS.")
