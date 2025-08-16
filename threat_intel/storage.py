@@ -1,3 +1,4 @@
+# threat_intel/storage.py
 import os
 import sqlite3
 from typing import Optional, Dict, Any, List
@@ -69,6 +70,7 @@ def migrate(conn: sqlite3.Connection):
 
 
 def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]) -> int:
+    """Insert or update by URL hash. Return row id."""
     url = item["url"]
     url_hash = hash_key(url)
     row = (
@@ -94,8 +96,7 @@ def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]) -> int:
             summary=excluded.summary,
             severity=excluded.severity
         ;
-        """
-        ,
+        """,
         row,
     )
     conn.commit()
@@ -148,8 +149,7 @@ def query_items(
         FROM items i
         LEFT JOIN labels l ON l.item_id = i.id
         WHERE 1=1
-    "
-    "
+    """
     params: List[Any] = []
 
     if sources:
@@ -191,3 +191,7 @@ def get_iocs_for_item_ids(conn: sqlite3.Connection, ids: List[int]) -> pd.DataFr
     q = f"SELECT item_id, type, value FROM ioc WHERE item_id IN ({','.join(['?']*len(ids))})"
     df = pd.read_sql_query(q, conn, params=ids)
     return df
+
+
+def export_items_dataframe(conn: sqlite3.Connection, **filters) -> pd.DataFrame:
+    return query_items(conn, **filters)
