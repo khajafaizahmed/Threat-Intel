@@ -155,6 +155,144 @@ def parse_eml(raw_bytes: bytes) -> Dict[str, Any]:
     return result
 
 
+# -------------------------------
+# Phone utilities (lightweight)
+# -------------------------------
+
+def analyze_phone_number(raw: str, default_region: str = "US") -> Dict[str, Any]:
+    """
+    Normalize and inspect a phone number using the `phonenumbers` library.
+    Returns a dict with E.164, validity, region, carrier, type, and location.
+
+    This imports `phonenumbers` lazily so the app still runs if the package
+    isn't installed (you'll just get a friendly message).
+    """
+    info: Dict[str, Any] = {"input": (raw or "").strip(), "error": None}
+    if not raw or not raw.strip():
+        info["error"] = "No number provided"
+        return info
+
+    try:
+        import phonenumbers
+        from phonenumbers import carrier, geocoder, number_type, PhoneNumberType
+    except Exception:
+        info["error"] = "phonenumbers not installed"
+        return info
+
+    try:
+        num = phonenumbers.parse(raw, default_region or "US")
+    except Exception as e:
+        info["error"] = f"Parse error: {e}"
+        return info
+
+    info["possible"] = phonenumbers.is_possible_number(num)
+    info["valid"] = phonenumbers.is_valid_number(num)
+    info["e164"] = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
+    info["national"] = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.NATIONAL)
+    info["region"] = phonenumbers.region_code_for_number(num) or default_region
+
+    # Map type to human label
+    t = number_type(num)
+    type_map = {
+        getattr(PhoneNumberType, "FIXED_LINE", 0): "fixed_line",
+        getattr(PhoneNumberType, "MOBILE", 1): "mobile",
+        getattr(PhoneNumberType, "FIXED_LINE_OR_MOBILE", 2): "fixed_line_or_mobile",
+        getattr(PhoneNumberType, "TOLL_FREE", 3): "toll_free",
+        getattr(PhoneNumberType, "PREMIUM_RATE", 4): "premium_rate",
+        getattr(PhoneNumberType, "SHARED_COST", 5): "shared_cost",
+        getattr(PhoneNumberType, "VOIP", 6): "voip",
+        getattr(PhoneNumberType, "PERSONAL_NUMBER", 7): "personal_number",
+        getattr(PhoneNumberType, "PAGER", 8): "pager",
+        getattr(PhoneNumberType, "UAN", 9): "uan",
+        getattr(PhoneNumberType, "VOICEMAIL", 10): "voicemail",
+        getattr(PhoneNumberType, "UNKNOWN", 99): "unknown",
+    }
+    info["type"] = type_map.get(t, "unknown")
+
+    # Offline metadata (best effort)
+    try:
+        info["carrier"] = carrier.name_for_number(num, "en") or ""
+    except Exception:
+        info["carrier"] = ""
+    try:
+        info["location"] = geocoder.description_for_number(num, "en") or ""
+    except Exception:
+        info["location"] = ""
+
+    return info
+
+
+def phone_risk_score(info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Heuristic 1–5 risk score with transparent signals.
+    Focuses on validity and suspicious patterns (no geo-bias).
+    """
+    if not info or info.get("error"):
+        return {"score": 5, "signals": ["No data / parse failure"]}
+
+    e164 = info.get("e164", "") or info.get("input", "")
+    base = 1
+    signals: List[str] = []
+
+    if not info.get("possible"):
+        base = 5; signals.append("Number not possible")
+    elif not info.get("valid"):
+        base = max(base, 4); signals.append("Number format invalid for region")
+
+    # Type-based hints (informational; small bumps)
+    t = (info.get("type") or "").lower()
+    if t in {"premium_rate", "shared_cost", "personal_number"}:
+        base = min(5, base + 2); signals.append(f"Type={t} can be higher risk")
+    elif t in {"voip", "uan", "pager"}:
+        base = min(5, base + 1); signals.append(f"Type={t} sometimes abused")
+
+    # Pattern hints (repeated/sequential digits)
+    digits = "".join(ch for ch in e164 if ch.isdigit())
+    if len(digits) >= 7:
+        if any(digits.count(d) >= 6 for d in set(digits)):  # 6+ of the same digit
+            base = min(5, base + 1); signals.append("Repetitive digits pattern")
+        seq = "0123456789"
+        if digits in seq or digits in seq[::-1]:
+            base = min(5, base + 1); signals.append("Sequential digits pattern")
+
+    # Clamp 1..5
+    base = clamp(base, 1, 5)
+    if base == 1 and not signals:
+        signals.append("No obvious risk signals")
+
+    return {"score": base, "signals": signals}
+
+
+# Optional enrichment: NumVerify (https://numverify.com/)
+_PHONE_CACHE: Dict[str, Any] = {}
+
+def numverify_lookup_cached(e164: str) -> Optional[Dict[str, Any]]:
+    """
+    Very light external enrichment if NUMVERIFY_API_KEY is present in secrets.
+    Returns the raw JSON from NumVerify or None on error/missing key.
+    """
+    key = _get_secret("NUMVERIFY_API_KEY")
+    if not key or not e164:
+        return None
+    if e164 in _PHONE_CACHE:
+        return _PHONE_CACHE[e164]
+    try:
+        sess = build_session()
+        # NumVerify expects digits only or international without '+'
+        q = e164.replace("+", "")
+        url = f"http://apilayer.net/api/validate?access_key={key}&number={q}&format=1"
+        r = sess.get(url, timeout=10)
+        data = r.json() if r.status_code < 400 else {"error": f"http {r.status_code}"}
+        _PHONE_CACHE[e164] = data
+        return data
+    except Exception:
+        return None
+
+
+# -------------------------------
+# VirusTotal helpers (optional)
+# -------------------------------
+
 _VT_CACHE: Dict[str, Any] = {}
 
 def vt_lookup_cached(indicator: str):
