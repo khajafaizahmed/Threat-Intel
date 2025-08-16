@@ -41,6 +41,10 @@ st.set_page_config(
     page_icon="🛡️",
 )
 
+# --- Session state (for auto-updated UI hints) ---
+if "last_ingest" not in st.session_state:
+    st.session_state["last_ingest"] = "—"
+
 # --- Header / Branding ---
 left, right = st.columns([1, 5], gap="large")
 with left:
@@ -153,6 +157,7 @@ def apply_pipeline_and_persist(items: List[Dict[str, Any]], source_name: str) ->
 # --- Tab: Dashboard ---
 with tabs[0]:
     st.subheader("Overview")
+    st.caption(f"Last ingest: {st.session_state.get('last_ingest','—')}")
 
     df = query_items(
         conn,
@@ -226,9 +231,14 @@ with tabs[1]:
                     st.error(f"{src_name}: {e}")
             done += 1
             progress.progress(int(done / total * 100))
+
+        # Notify user
         st.toast(f"Done. Inserted/updated {total_inserted} items.", icon="✅")
-        # If you cached any data-fetch calls, clear them here.
-        # st.cache_data.clear()
+
+        # Update UI hint and force fresh data on next render
+        st.session_state["last_ingest"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+        st.cache_data.clear()  # clear cached data (safe; leaves models/DB conn cached)
+        st.rerun()             # <— refresh the whole app so Dashboard shows new rows immediately
 
 # --- Tab: Phishing Analyzer (EML) ---
 with tabs[2]:
