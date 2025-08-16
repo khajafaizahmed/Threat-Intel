@@ -407,4 +407,4 @@ with tabs[3]:
             with open(db_path, "rb") as f:
                 st.download_button("Download DB", f, file_name="threats.db", mime="application/octet-stream")
 
-st.caption("© 2025 • For demo, education, and research. Respect source ToS.")
+st.caption("© 2025 • Made by Faiz Ahmed! For demo, education, and research. Respect source ToS.")
