@@ -1,0 +1,31 @@
+# Publicly accessible feeds (safe defaults). Toggle enabled as needed.
+- name: CISA Alerts (RSS)
+  type: rss
+  url: https://www.cisa.gov/news-events/alerts.rss
+  max_items: 20
+  enabled: true
+
+- name: The Hacker News (RSS)
+  type: rss
+  url: https://feeds.feedburner.com/TheHackersNews
+  max_items: 20
+  enabled: true
+
+- name: BleepingComputer (RSS)
+  type: rss
+  url: https://www.bleepingcomputer.com/feed/
+  max_items: 20
+  enabled: true
+
+# Example HTML source (disabled by default). Adjust selectors to a real page if desired.
+- name: Example Security Blog (HTML)
+  type: html
+  url: https://example.com/security
+  max_items: 10
+  enabled: false
+  selectors:
+    list_selector: article
+    title_selector: h2
+    href_selector: a
+    date_selector: time
+    body_selector: article
