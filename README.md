@@ -1,5 +1,7 @@
 # 🛡️ AI-Powered Cyber Threat & Phishing Intelligence Platform
 
+[![tests](https://github.com/khajafaizahmed/Threat-Intel/actions/workflows/tests.yml/badge.svg)](https://github.com/khajafaizahmed/Threat-Intel/actions/workflows/tests.yml)
+
 A CPU-friendly **Streamlit** dashboard that **scrapes** cyber-security sources (RSS/HTML), **extracts IoCs** (Indicators of Compromise), **summarizes & classifies** content, **de-duplicates & stores** to SQLite, and **visualizes** trends and an **IoC graph**. It also **parses `.eml` phishing emails** for rapid triage.
 
 > Built to run on **Streamlit Community Cloud** with sensible limits and graceful fallbacks.
